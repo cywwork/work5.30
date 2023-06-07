@@ -2,7 +2,7 @@
 target=$1 #目标芯片名
 dpath="./shell_test_project_code/device/agenew" #芯片内核号
 cpath="./shell_test_project_code" #cofig所在文件
-#找到内核版本
+#找到内核版本-
 for i in `find $dpath -name "*$target*" -type d`
 do
 	newpath="$i/ProjectConfig.mk"
