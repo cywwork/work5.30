@@ -1,19 +1,27 @@
 #!/bin/bash
+if [ ! -n  "$1" ]
+then
+	echo "请输入设备名！"
+	echo "请在有/shell_test_project_code路径下运行"
+	exit -1
+fi
 target=$1 #目标芯片名
-dpath="./shell_test_project_code/device/agenew" #芯片内核号
-cpath="./shell_test_project_code" #cofig所在文件
-#找到内核版本-
-for i in `find $dpath -name "*$target*" -type d`
+IcPath="./shell_test_project_code/device/agenew" #芯片内核号所在的路径
+ConfigPath="./shell_test_project_code" #config所在文件
+
+#找到内核版本
+for icpath in `find $IcPath -name "*$target*" -type d`
 do
-	newpath="$i/ProjectConfig.mk"
-	#echo $newpath
-	version=$(grep "LINUX_KERNEL_VERSION" $newpath |cut -d ' ' -f3)
-	#echo $version
+	
+	ProjectPath="$icpath/ProjectConfig.mk"
+	#内核版本号
+	version=$(grep "LINUX_KERNEL_VERSION" $ProjectPath |cut -d ' ' -f3)
+	
 
 	#找到config信息,不获取debug版本的配置信息
-	for j in `find "$cpath/$version" -name "*$target*config" ! -name "*debug*" -type f`
+	for configpath in `find "$ConfigPath/$version" -name "*$target*config" ! -name "*debug*" -type f`
 	do
-		config=$(grep "CONFIG_CUSTOM_KERNEL_LCM" $j |cut -d "\"" -f2)
+		config=$(grep "CONFIG_CUSTOM_KERNEL_LCM" $configpath |cut -d "\"" -f2)
 		
 	done
 	#切割输出对应的信息
@@ -28,8 +36,10 @@ do
 		echo " "	
 
 	done
-
 	
 done
 
-
+if [ ! -n "$icpath" ]
+then
+	echo "没有这个设备名字，请检测输入设备名"
+fi
