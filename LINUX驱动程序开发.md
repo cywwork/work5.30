@@ -366,7 +366,7 @@ minf = min_t(float, fa, fb);
  _x < _y ? _x : _y; })
 ```
 
-**难点二**   (void) (&_x == &_y) 是为了校验 _x   _y的类型是否一致
+**难点二**   (void) (&_x == &_y) 是为了校验 _x   _y的类型是否一致,原理是取地址比较是否一样先要验证类型是否一致不一样会报warning
 
 ### 5 可变参数宏
 
@@ -735,8 +735,6 @@ Jul  2 01:06:21 localhost kernel:  book num:5000
 
 在/sys下 可以看到book模块的参数
 
-
-
 ```c
 barry@barry-VirtualBox:/sys/module/book/parameters$ tree
 .├── book_name└── book_num
@@ -758,8 +756,6 @@ EXPORT_SYMBOL_GPL（）只适用于包含GPL许可权的模块。
 
 导出整数加、减运算函数符号的内核模块的例子。
 
-
-
 ```c
  #include <linux/init.h> 
  #include <linux/module.h> 
@@ -778,8 +774,6 @@ EXPORT_SYMBOL_GPL（）只适用于包含GPL许可权的模块。
 
 从“/proc/kallsyms”文件中找出add_integar、sub_integar的相关信息：
 
-
-
 ```c
 #grep integar /proc/kallsyms
 e679402c r __ksymtab_sub_integar    [export_symb]
@@ -794,11 +788,7 @@ e6793010 t sub_integar    [export_symb]
 
 可以看到导出的符号
 
-
-
 ## 4.7 模块声明与描述
-
-
 
 ```c
 MODULE_AUTHOR(author);
@@ -808,6 +798,586 @@ MODULE_DEVICE_TABLE(table_info);
 MODULE_ALIAS(alternate_name);
 ```
 
-
-
 ## 4.8模块的使用计数
+
+增加、减少模块计数函数以及
+
+```c
+int try_module_get(struct module *module);
+void try_module_put(struct module *module);
+```
+
+总结：来说就是有设备使用就增加 没有就减少，只有没有设备使用这模块时才能被卸载
+
+## 4.9 模块的编译
+
+```makefile
+KVERS = $(shell uname -r)
+# Kernel modules
+obj-m += hello.o
+# Specify flags for the module compilation.
+#EXTRA_CFLAGS=-g -O0
+build: kernel_modules
+kernel_modules:
+ make -C /lib/modules/$(KVERS)/build M=$(CURDIR) modules
+clean:
+ make -C /lib/modules/$(KVERS)/build M=$(CURDIR) clean
+```
+
+uname -r 显示操作系统的发行编号。
+
+多文件使用下面这种避免重复编译没有修改的部分
+
+```makefile
+obj-m := modulename.o
+modulename-objs := file1.o file2.o
+```
+
+#EXTRA_CFLAGS=-g -O0  开启后是获取调试信息
+
+## 4.10使用模块“绕开”GPL
+
+EXPORT_SYMBOL_GPL（）导出的符号是不可以被非GPL模块引用
+
+Linux内核不能使用非GPL许可权。
+
+https://zhuanlan.zhihu.com/p/420678888
+
+# 第五章 linux文件系统与设备文件
+
+## 5.1Linux 文件操作
+
+### 5.1.1文件操作系统调用
+
+**1 创建**
+
+参数mode指定权限 umask是去掉一些权限
+
+```c
+int creat(const char *filename, mode_t mode);
+//调用把umask设置为newmask，返回旧umask
+int umask(int newmask);
+```
+
+**2 打开**
+
+前面是路径加名字 缺省就是当前路径下的文件
+
+```c
+int open(const char *pathname, int flags);
+int open(const char *pathname, int flags, mode_t mode);
+```
+
+flags
+
+| 标志        | 含义                          |
+| --------- | --------------------------- |
+| O_RDONLY  | 只读                          |
+| O_WRONLY  | 只写                          |
+| O_RDWR    | 读写                          |
+| O_APPEDN  | 追加                          |
+| O_CREAT   | 创建一个文件                      |
+| O_EXEC    | 如O_CREAT文件已存在，就发生一个错误 返回 -1 |
+| O_NOBLOCK | 非阻塞打开一个文件                   |
+| O_TRUNC   | 如文件存在就删除内容                  |
+
+O_RDONLY、O_WRONLY、O_RDWR三个标志只能使用任意的一个。
+
+以上参数作为选用参数用位或 | 连接
+
+```c
+不写O_NONBLOCK参数时会默认使用阻塞方式打开文件，
+用位或的方式加上 O_NONBLOCK参数就可设置为非阻塞式打开。
+
+阻塞模式下时用read函数读取文件数据时文件有数据时则返回数据，
+文件内没有内容时则等待，写操作时和读操作也会停留等待，
+导致后续的程序无法执行
+但采用轮询的方式访问外接设备时，
+显而易见阻塞模式下无法实现轮询的操作。
+这时我们就需要用到非阻塞方式打开文件了，
+非阻塞模式下如果读操作没有读取到数据不会等待会立即返回一个错误信息，
+然后继续向下执行程序。
+```
+
+使用了O_CREAT标志，则使用的函数是int open（const char*pathname，int flags，mode_t mode）；这个时候我们还要指定mode标志，以表示文件的访问权限。mode可以是表5.2中所列值的组合。
+
+不写O_NONBLOCK参数时会默认使用阻塞方式打开文件，用位或的方式加上 O_NONBLOCK参数就可设置为非阻塞式打开。
+
+![](./md-LINUX驱动程序开发/20230612110015.png)
+
+Linux用5个数字来表示文件的各种权限：第一位表示设置用户ID；第二位表示设置组ID；第三位表示用户自己的权限位；第四位表示组的权限；最后一位表示其他人的权限。每个数字可以取1（执行权限）、2（写权限）、4（读权限）、0（无）或者是这些值的和。
+
+例如，要创建一个用户可读、可写、可执行，但是组没有权限，其他人可以读、可以执行的文件，并设置用户ID位，那么应该使用的模式是1（设置用户ID）、
+
+0（不设置组ID）、7（1+2+4，读、写、执行）、0（没有权限）、5（1+4，读、执行）即10705：
+
+下面的式子等价
+
+```c
+open("test", O_CREAT, 10 705);
+open("test", O_CREAT, S_IRWXU | S_IROTH | S_IXOTH | S_ISUID );
+```
+
+**3 读写**
+
+```c
+int read(int fd, const void *buf, size_t length);
+int write(int fd, const void *buf, size_t length);
+```
+
+参数buf为指向缓冲区的指针
+
+length为缓冲区的大小（以字节为单位）
+
+函数read:从**文件描述符fd**所指定的文件中读取length个字节到buf所指向的**缓冲区**中，返回值为实际读取的字节数。
+
+函数write:把length个字节从buf指向的**缓冲区**中写到**文件描述符fd**所指向的文件中，返回值为实际写入的字节数。
+
+以O_CREAT为标志的open实际上实现了文件创建的功能，因此，下面的函数等同于creat（）函数：（把打开的文件清空）
+
+int open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
+
+**4 定位**
+
+```c
+int lseek(int fd, offset_t offset, int whence);
+```
+
+```c
+lseek（）将文件读写指针相对whence移动offset个字节。
+操作成功时，返回文件指针相对于文件头的位置。
+参数whence可使用下述值：
+SEEK_SET：相对文件开头
+SEEK_CUR：相对文件读写指针的当前位置
+SEEK_END：相对文件末尾offset可取负值
+
+将文件指针相对当前位置向前移动5个字节：
+lseek(fd, -5, SEEK_CUR);
+
+由于lseek函数的返回值为文件指针相对于文件头的位置，
+返回值是文件的长度：
+lseek(fd, 0, SEEK_END);
+```
+
+**5.关闭**
+
+调用完关闭
+
+```c
+int close(int fd);
+```
+
+```c
+#include <sys/types.h> 
+#include <sys/stat.h> 
+#include <fcntl.h> 
+#include <stdio.h>
+#define LENGTH 100 
+main() 
+{ 
+int fd, len;
+char str[LENGTH];
+fd = open("hello.txt", O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+//创建并打开文件 
+if (fd) {
+    write(fd, "Hello World", strlen("Hello World")); 
+//写入字符串
+    close(fd);
+        }
+fd = open("hello.txt", O_RDWR);
+len = read(fd, str, LENGTH); //读取文件内容 返回长度
+str[len] = '\0';
+printf("%s\n", str);
+close(fd);
+
+}
+```
+
+### 5.1.2c库文件操作
+
+**1.创建和打开**
+
+```c
+fiLE *fopen(const char *path, const char *mode);
+```
+
+![](./md-LINUX驱动程序开发/20230612113019.png)
+
+```c
+int fgetc(fiLE *stream);
+int fputc(int c, fiLE *stream);
+char *fgets(char *s, int n, fiLE *stream);
+int fputs(const char *s, fiLE *stream);
+int fprintf(fiLE *stream, const char *format, ...);
+int fscanf (fiLE *stream, const char *format, ...);
+size_t fread(void *ptr, size_t size, size_t n, fiLE *stream);
+size_t fwrite (const void *ptr, size_t size, size_t n, fiLE *stream);
+```
+
+fread（）实现从流（stream）中读取n个字段，每个字段为size字节，并将读取的字段放入ptr所指的字符数组中，返回实际已读取的字段数。
+
+当读取的字段数小于num时，可能是在函数调用时出现了错误，也可能是读到了文件的结尾。因此要通过调用feof（）和ferror（）来判断。
+
+fwrite（）实现从缓冲区ptr所指的数组中把n个字段写到流（stream）中，每个字段长为size个字节，返回实际写入的字段数。
+
+定位
+
+```c
+int fgetpos(fiLE *stream, fpos_t *pos);
+int fsetpos(fiLE *stream, const fpos_t *pos);
+int fseek(fiLE *stream, long offset, int whence);
+```
+
+ **3、关闭**
+
+```c
+int fclose (fiLE *stream);
+```
+
+4.和上面5.1的代码效果一样
+
+```c
+#include <stdio.h> 
+#define LENGTH 100 
+main() 
+{
+    fiLE *fd;
+    char str[LENGTH];
+    fd = fopen("hello.txt", "w+");/* 创建并打开文件 */ 
+    if (fd) {
+        fputs("Hello World", fd); /* 写入字符串 */
+        fclose(fd); 
+            }
+    fd = fopen("hello.txt", "r");
+    gets(str, LENGTH, fd);       /* 读取文件内容 */
+    printf("%s\n", str);
+    fclose(fd);
+}
+```
+
+## 5.2Linux文件系统
+
+### 5.2.1Linux文件系统目录结构
+
+1./bin
+
+包含基本命令，如ls、cp、mkdir等，这个目录中的文件都是可执行的。
+
+2./sbin
+
+    包含系统命令，如modprobe、hwclock、ifconfig等，大多是涉及系统管理的命令，这个目录中的文件都是可执行的。
+
+3./dev
+
+设备文件存储目录，应用程序通过对这些文件的读写和控制以访问实际的设备。
+
+5./lib
+
+系统库文件存放目录等。
+
+6./mnt
+
+/mnt这个目录一般是用于存放挂载储存设备的挂载目录
+
+7./opt
+
+opt是“可选”的意思，有些软件包会被安装在这里。
+
+8./proc
+
+操作系统运行时，进程及内核信息（比如CPU、硬盘分区、内存信息等）存放在这里。/proc目录为伪文件系统proc的挂载目录，proc并不是真正的文件系统，它存在于内存之中。
+
+9./tmp
+
+用户运行程序的时候，有时会产生临时文件，/tmp用来存放临时文件。
+
+10./usr
+
+这个是系统存放程序的目录，比如用户命令、用户库等。
+
+11./var
+
+var表示的是变化的意思，这个目录的内容经常变动，如/var的/var/log目录被用来存放系统日志。
+
+12./sys
+
+Linux 2.6以后的内核所支持的sysfs文件系统被映射在此目录上。Linux设备驱动模型中的总线、驱动和设备都可以在sysfs文件系统中找到对应的节点。当内核检测到在系统中出现了新设备后，内核会在sysfs文件系统中为该新设备生成一项新的记录。
+
+sysfs被看成是与proc、devfs和devpty同类别的文件系统，
+
+该文件系统是一个虚拟的文件系统，它可以产生一个包括所有系统硬件的层级视图，与提供进程和状态信息的proc文件系统十分类似。
+
+### 5.2.2 文件系统与设备驱动
+
+应用程序和VFS之间的接口是系统调用，而VFS与文件系统以及设备文件之间的接口是file_operations结构体成员函         （虚拟文件系统(VFS,Vitual Filesystem)）
+
+![](./md-LINUX驱动程序开发/20230612134922.png)
+
+由于字符设备的上层没有类似于磁盘的ext2等文件系统，所以字符设file_operations成员函数就直接由设备驱动提供了
+
+file_operations正是字符设备驱动的核心。
+
+块设备有两种访问方法
+
+一：不通过文件系统直接访问裸设备，在Linux内核实现了统一的def_blk_fops这一file_operations，它的源代码位于fs/block_dev.c
+
+当运行类似于“dd if=/dev/sdb1of=sdb1.img”的命令把整个/dev/sdb1裸分区复制到sdb1.img的时候内核走的是def_blk_fops这个file_operations；
+
+二：是通过**文件系统**来访问块设备，file_operations的实现则位于文件系统内，文件系统会把针对文件的读写转换为针对块设备原始扇区的读写。ext2、fat、Btrfs等文件系统中会实现针对VFS的file_operations成员函数，设备驱动层看不到file_operations的存在。
+
+1.file结构体
+
+file结构体代表一个打开的文件，系统中每个打开的文件在内核空间都有一个关联的struct file。它由内核在打开文件时创建，并传递给在文件上进行操作的任何函数。在文件的所有实例都关闭后，内核释放这个数据结构。在内核和驱动源代码中，struct file的指针通常被命名为file或filp
+
+文件结构体的定义如下
+
+```c
+struct file {
+union {
+    struct llist_node    fu_llist;
+    struct rcu_head      fu_rcuhead;
+    } f_u;
+struct path              f_path;
+#define f_dentry          f_path.dentry 
+//dentry存放目录项和其下的文件链接信息
+struct inode             *f_inode;      /* cached value */
+const struct file_operations*f_op;      /* 和文件关联的操作*/
+spinlock_t          f_lock;
+atomic_long_t       f_count;
+unsigned int        f_flags;       
+/*文件标志，如O_RDONLY、O_NONBLOCK、O_SYNC*/
+fmode_t             f_mode;        
+/*文件读/写模式，FMODE_READ和FMODE_WRITE*/
+struct mutex        f_pos_lock;
+loff_t              f_pos;         /* 当前读写位置 */
+struct fown_struct  f_owner;
+const struct cred   *f_cred;
+struct file_ra_statef_ra;
+u64                f_version;
+#ifdef CONfiG_SECURITY27  
+ void         *f_security;
+#endif
+void         *private_data;        /*文件私有数据*/
+//私有数据指针private_data在设备驱动中被广泛应用，
+//大多被指向设备驱动自定义以用于描述设备的结构体。
+#ifdef CONfiG_EPOLL33 
+ /* 通过使用fs/eventpoll.c 去链接所有 与这个文件有挂钩的*/ 
+struct list_head     f_ep_links;
+struct list_head     f_tfile_llink;
+#endif  
+/* #ifdef CONfiG_EPOLL */
+struct address_space*f_mapping;
+} __attribute__((aligned(4))); 
+/* 表示该结构类型的变量以 4 字节对齐*/
+```
+
+判断以阻塞还是非阻塞方式打开设备文件：
+
+```c
+if (file->f_flags & O_NONBLOCK)     /* 非阻塞 */      
+    pr_debug("open: non-blocking\n");
+else                                /* 阻塞 */     
+    pr_debug("open: blocking\n");
+```
+
+2.inode结构体
+
+inode结点包含：文件访问权限、属主、组、大小、生成时间、访问时间、最后修改时间等信息
+
+```c
+struct inode { 
+    ...      
+    umode_t i_mode;            /* inode的权限 */
+    uid_t i_uid;               /* inode拥有者的id */
+    gid_t i_gid;               /* inode所属的群组id */
+    dev_t i_rdev;              /* 若是设备文件，此字段将记录设备的设备号 */ 
+    //Linux内核设备编号分为主设备编号和次设备编号，
+    //前者为dev_t的高12位，后者为dev_t的低20位。
+    loff_t i_size;             /* inode所代表的文件大小 */
+    struct timespec i_atime;   /* inode最近一次的存取时间 */
+    struct timespec i_mtime;   /* inode最近一次的修改时间 */    
+    struct timespec i_ctime;   /* inode的产生时间 */
+    unsigned int        i_blkbits;    
+    blkcnt_t            i_blocks;  
+/* inode所使用的block数，一个block为512 字节 */    
+    union {
+    struct pipe_inode_info  *i_pipe;
+    struct block_device     *i_bdev;
+// 若是块设备，为其对应的block_device结构体指针 
+    struct cdev *i_cdev;     /* 若是字符设备，为其对应的cdev结构体指针 */
+    }
+    ...
+};
+```
+
+查看/proc/devices文件可以获知系统中注册的设备，第1列为主设备号，第2列为设备名
+
+查看/dev目录可以获知系统中包含的设备文件，日期的前两列给出了对应设备的主设备号和次设备号
+
+```
+crw-rw---- 1 root uucp 4, 64 Jan 30 2003 /dev/ttyS0b
+rw-rw---- 1 root disk 8, 0 Jan 30 2003 /dev/sda
+```
+
+主设备号是与驱动对应的概念，同一类设备一般使用相同的<u>主设备号</u>，不同类的设备一般使用不同的主设备号。因为同一驱动可支持多个同类设备，用<u>次设备号</u>来描述使用该驱动的设备的序号，序号一般从0开始。
+
+内核Documents目录下的devices.txt文件描述了Linux设备号的分配情况
+
+## 5.3　devfs
+
+作用：设备驱动程序能自主地管理自己的设备文件
+
+1）可以通过程序在设备初始化时在/dev目录下创建设备文件，卸载设备时将它删除。
+
+2）设备驱动程序可以指定设备名、所有者和权限位，用户空间程序仍可以修改所有者和权限位。
+
+3）不再需要为设备驱动程序分配主设备号以及处理次设备号，在程序中可以直接给
+
+register_chrdev（）传递0主设备号以获得可用的主设备号，并在devfs_register（）中指定次设备号。
+
+```c
+/* 创建设备目录 */
+devfs_handle_t devfs_mk_dir(devfs_handle_t dir, const char *name, \
+void *info);
+/* 创建设备文件 */
+devfs_handle_t devfs_register(devfs_handle_t dir, const char *name,\
+unsigned   int flags, unsigned int major, unsigned int minor, \
+umode_t mode, void *ops,   void *info);
+/* 撤销设备文件 */
+void devfs_unregister(devfs_handle_t de);
+```
+
+devfs使用模板
+
+```c
+static devfs_handle_t devfs_handle;
+static int _ _init xxx_init(void)
+{
+    int ret;//接收返回的设备号
+    int i;
+    /* 在内核中注册设备 */
+    ret = register_chrdev(XXX_MAJOR, DEVICE_NAME, &xxx_fops);
+    if (ret < 0) {
+        printk(DEVICE_NAME " can't register major number\n");
+        return ret;}
+    /* 创建设备文件 */
+ devfs_handle =devfs_register(NULL, DEVICE_NAME, DEVFS_FL_DEFAULT,
+ XX_MAJOR, 0, S_IFCHR | S_IRUSR | S_IWUSR, &xxx_fops, NULL);
+ ...
+     printk(DEVICE_NAME " initialized\n");
+     return 0;
+ }
+ static void _ _exit xxx_exit(void)
+ {
+     devfs_unregister(devfs_handle);
+     /* 撤销设备文件 */
+     unregister_chrdev(XXX_MAJOR, DEVICE_NAME);  
+    /* 注销设备 */
+ }
+module_init(xxx_init);
+module_exit(xxx_exit);
+```
+
+## 5.4 udev用户空间设备管理
+
+### 5.4.1 udev与devfs的区别
+
+devfs所做的工作被确信可以在用户态来完成
+
+devfs与udev的另一个显著区别在于：采用devfs，当一个并不存在的/dev节点被打开的时候，devfs能自动加载对应的驱动
+
+udev则不这么做,因为udev的设计者认为Linux应该在设备被发现的时候加载驱动模块，而不是当它被访问的时候,devfs所提供的打开/dev节点时自动加载驱动的功能对一个配置正确的计算机来说是多余的。系统中所有的设备都应该产生热插拔事件并加载恰当的驱动，而udev能注意到这点并且为它创建对应的设备节点。
+
+### 5.4.2　sysfs文件系统与Linux设备模型
+
+sysfs把连接在系统上的设备和总线组织成为一个分级的文件，它们可以由用户空间存取，向用户空间导出内核数据结构以及它们的属性。sysfs的一个目的就是展示设备驱动模型中各组件的层次关系，其顶级目录包括block、bus、dev、devices、class、fs、kernel、power和firmware等。
+
+- block目录包含所有的块设备
+
+- devices目录包含系统所有的设备，并根据设备挂接的总线类型组织成层次结构
+
+- bus目录包含系统中所有的总线类型
+
+- class目录包含系统中的设备类型（如网卡设备、声卡设备、输入设备等）。
+
+## 5.5　总结
+
+- Linux用户空间的文件编程有两种方法，即通过Linux API和通过C库函数访问文件。用户空间看不到设备驱动，能看到的只有与设备对应的文件，因此文件编程也就是用户空间的设备编程。
+
+- Linux按照功能对文件系统的目录结构进行了良好的规划。/dev是设备文件的存放目录，devfs和udev分别是Linux 2.4和Linux 2.6以后的内核生成设备文件节点的方法，前者运行于内核空间，后者运行于用户空间。
+
+- Linux 2.6以后的内核通过一系列数据结构定义了设备模型，设备模型与sysfs文件系统中的目录和文件存在一种对应关系。设备和驱动分离，并通过总线进行匹配。
+
+- udev可以利用内核通过netlink发出的uevent信息动态创建设备文件节点。
+
+# 第6章　字符设备驱动
+
+## 6.1　Linux字符设备驱动结构
+
+### 6.1.1　cdev结构体
+
+```c
+struct cdev {
+
+struct kobject kobj; /* 内嵌的kobject对象 */
+struct module *owner; /* 所属模块*/
+struct file_operations *ops; /* 文件操作结构体*/
+struct list_head list;
+dev_t dev; /* 设备号*/
+unsigned int count;
+};
+//cdev结构体的dev_t成员定义了设备号，为32位，其中12位为主设备号，
+//20位为次设备号。使用下列宏可以从dev_t获得主设备号和次设备号：
+MAJOR(dev_t dev)
+MINOR(dev_t dev)
+//通过主设备号和次设备号生成dev_t：
+MKDEV(int major, int minor)
+//初始化并建立cdev和file_operations之间的连接
+void cdev_init(struct cdev *, struct file_operations *);
+//cdev_alloc()用来给cdev结构体动态申请内存
+struct cdev *cdev_alloc(void);
+//
+void cdev_put(struct cdev *p);
+//cdev_add()函数和cdev_del()函数用来向系统添加和删除一个cdev，
+//完成字符设备的注册和注销。
+int cdev_add(struct cdev *, dev_t, unsigned);
+void cdev_del(struct cdev *);
+```
+
+```c
+void cdev_init(struct cdev *cdev, struct file_operations *fops)
+
+{
+
+memset(cdev, 0, sizeof *cdev);
+
+INIT_LIST_HEAD(&cdev->list);
+
+kobject_init(&cdev->kobj, &ktype_cdev_default);
+
+cdev->ops = fops; /* 将传入的文件操作结构体指针赋值给cdev的ops*/
+
+}
+```
+
+```c
+struct cdev *cdev_alloc(void)
+
+{
+
+ struct cdev *p = kzalloc(sizeof(struct cdev), GFP_KERNEL);
+
+    if (p) {
+
+          INIT_LIST_HEAD(&p->list);
+
+          kobject_init(&p->kobj, &ktype_cdev_dynamic);
+
+           }
+
+     return p;
+
+}
+```
+
+## 6.1.2　分配和释放设备号
