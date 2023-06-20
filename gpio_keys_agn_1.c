@@ -14,6 +14,7 @@
 #include <linux/of_platform.h> 
 
 #include <linux/miscdevice.h> //混杂设备注册
+#include <linux/interrupt.h> //中断
 
 #define GPIO_MAX_COUNT    保存最大引脚数
 //保存引脚的数组
@@ -31,8 +32,20 @@ static int key_major = 0;
 
 /* key结构体 */
 struct key_data {
-    int gpio;
+    int irq;                // 中断号
+    int gpio;               // GPIO号
+    bool value;             // 按键状态
 };
+/*第一个参数：中断函数注册时的中断号irq
+第二个参数：注册的时候最后一个参数dev_id*/
+static irqreturn_t key_irq_handler(int irq, void *dev_id)
+{
+    struct key_data *key = dev_id
+    //获取按键的值
+    key->value  = !gpio_get_value(key->gpio)
+
+    return IRQ_HANDLED
+}
 //实例化 改在probe里面分配空间方便释放
 
 //打开开关函数
@@ -59,19 +72,18 @@ static int key_close (struct inode *inode, struct file *file)
 static ssize_t key_read(struct file *filp, char __user *buf, size_t len, 
 loff_t *fpos)
 {
-    int value;
-	//保存读取引脚的值
-	//获取设备私有数据结构体所在的设备结构体的指针。
-	struct key_data *data = container_of(filp->private_data,
-                                        struct my_key, miscdev);
+    struct key_data *key = container_of(filp->private_data, struct key_data, 
+gpio);
 
-	//输出数据
-    value = gpio_get_value(data->gpio);
+    if (key->value) {
+        if (put_user('1', buf))
+            return -EFAULT;
+    } else {
+        if (put_user('0', buf))
+            return -EFAULT;
+    }
 
-    if (copy_to_user(buf, &value, sizeof(value)))
-        return -EFAULT;
-
-    return sizeof(value);
+    return 1;
 
 }
 
@@ -102,31 +114,50 @@ static int mykey_probe(struct platform_device *pdev)
 {
 	//初始化
 	struct device *dev = &pdev->dev;
-	struct key_data *data;
-	int i, ret;
+	struct key_data *key;
+	int i, ret,irq;
 	//遍历获取gpio口的值
 	for (i = 0; i < ARRAY_SIZE(key_miscdev); i++) {
 		//这样分配的空间设备被卸载时会自动释放
-        data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
-        if (!data)
+        key = devm_kzalloc(dev, sizeof(*key), GFP_KERNEL);
+        if (!key)
             return -ENOMEM;
 
-        data->gpio = of_get_gpio(dev->of_node, i);
-        if (data->gpio < 0) {
+        key->gpio = of_get_gpio(dev->of_node, i);
+        if (key->gpio < 0) {
             dev_err(dev, "failed to get gpio%d\n", i);
-            return data->gpio;
+            return key->gpio;
         }
-		//读值
-        ret = gpio_request(data->gpio, "agn,gpio_key");
+		//请求端口资源
+        ret = gpio_request(key->gpio, "agn,gpio_key");
         if (ret) {
             dev_err(dev, "failed to request gpio%d\n", i);
             return ret;
         }
-		//设置输入
-        ret = gpio_direction_input(data->gpio);
+		//设置输入模式
+        ret = gpio_direction_input(key->gpio);
         if (ret) {
             dev_err(dev, "failed to set gpio%d direction\n", i);
             goto err_gpio;
+        }
+
+        //获取端口的中断号
+        key->irq = gpio_to_irq(key->gpio);
+        if(key->irq < 0){
+            dev_err(&pdev->dev, "failed to get the irq%d", i)
+        }
+
+        // 将中断号与处理函数对应
+        /*
+            参数一：中断号
+            参数二：处理函数
+            参数三：触发方式 四名字 五devid
+        */
+        ret = request_irq(key->irq, key_irq_handler, IRQF_TRIGGER_LOW,
+                            ("key%d", i),key);
+        if (ret) {
+            dev_err(&pdev->dev, "failed to request irq%d", i);
+            return ret;
         }
 
         key_miscdev[i].name = devm_kasprintf(dev, GFP_KERNEL, "%s%d",
@@ -146,8 +177,8 @@ static int mykey_probe(struct platform_device *pdev)
             dev_err(dev, "failed to register misc device %d\n", i);
             goto err_gpio;
         }
-
-        platform_set_drvdata(pdev, data);
+        //保存数据
+        platform_set_drvdata(pdev, key);
     }
 
     pr_info(DRIVER_NAME ": initialized\n");
@@ -156,9 +187,9 @@ static int mykey_probe(struct platform_device *pdev)
 
 err_gpio:
 while (--i >= 0) {
-	data = platform_get_drvdata(pdev);
+	key = platform_get_drvdata(pdev);
 	misc_deregister(&key_miscdev[i]);
-	gpio_free(data->gpio);
+	gpio_free(key->gpio);
 }
 return ret;	
 		
@@ -170,9 +201,10 @@ static int mykey_remove(struct platform_device *dev)
     int i;
 
     for (i = 0; i < ARRAY_SIZE(key_miscdev); i++) {
-        data = platform_get_drvdata(pdev);
+        key = platform_get_drvdata(pdev);
         misc_deregister(&key_miscdev[i]);
-        gpio_free(data->gpio);
+        gpio_free(key->gpio);
+        free_irq(key->irq, key)
     }
 
     return 0;
