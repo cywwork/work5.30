@@ -15,19 +15,21 @@
 
 #include <linux/miscdevice.h> //混杂设备注册
 #include <linux/interrupt.h> //中断
-
+#include <linux/wait.h>   //等待队列
 #define GPIO_MAX_COUNT    保存最大引脚数
 //保存引脚的数组
-static struct gpio key_gpios[GPIO_MAX_COUNT];
+//static struct gpio key_gpios[GPIO_MAX_COUNT];
 //按键的设备号
-static int key_major = 0;
+//static int key_major = 0;
 //定义按键的键值
-#define KEY0_VAL            0xF0
-#define INV_KEY_VAL         0x00
+//#define KEY0_VAL            0xF0
+//#define INV_KEY_VAL         0x00
 //定义关于设备注册的参数
+//#define KEY_CNT             1               /* 按键设备数 */
 
-#define KEY_CNT             1               /* 按键设备数 */
 #define KEY_NAME            "key"           /* 按键名称 */
+//增加__must_be_array(arr)来检查参数是否是一个数组，如果不是则会在编译期间报错
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]) + __must_be_array(arr))
 
 
 /* key结构体 */
@@ -35,6 +37,7 @@ struct key_data {
     int irq;                // 中断号
     int gpio;               // GPIO号
     bool value;             // 按键状态
+    wait_queue_head_t wait_queue; //等待队列头
 };
 /*第一个参数：中断函数注册时的中断号irq
 第二个参数：注册的时候最后一个参数dev_id*/
@@ -43,6 +46,8 @@ static irqreturn_t key_irq_handler(int irq, void *dev_id)
     struct key_data *key = dev_id
     //获取按键的值
     key->value  = !gpio_get_value(key->gpio)
+    //有中断就唤醒等待队列
+    wake_up_interruptible(key->wait_queue);
 
     return IRQ_HANDLED
 }
@@ -72,10 +77,15 @@ static int key_close (struct inode *inode, struct file *file)
 static ssize_t key_read(struct file *filp, char __user *buf, size_t len, 
 loff_t *fpos)
 {
-    struct key_data *key = container_of(filp->private_data, struct key_data, 
-gpio);
+    struct key_data *key = container_of(filp->private_data, struct key_data, gpio);
+    int value;
+    //函数会等待一个条件成立，如果条件（第二个参数）不成立，则会将当前进程或线程挂起，
+    //直到条件成立或者被信号中断 这里是等待按键的状态变化实现阻塞
+    wait_event_interruptible(key->wait_queue,key->value != gpio_get_value(key->gpio))
 
-    if (key->value) {
+    value = key->value;
+
+    if (value) {
         if (put_user('1', buf))
             return -EFAULT;
     } else {
@@ -97,7 +107,7 @@ static struct file_operations key_fops = {
 //混杂设备的结构体
 static struct miscdevice key_miscdev[] = {
     {
-        .minor = MISC_DYNAMIC_MINOR,
+        .minor = MISC_DYNAMIC_MINOR,//255
         .name = "my-key0",
         .fops = &key_fops,
     },
@@ -122,7 +132,7 @@ static int mykey_probe(struct platform_device *pdev)
         key = devm_kzalloc(dev, sizeof(*key), GFP_KERNEL);
         if (!key)
             return -ENOMEM;
-
+        //获取端口号
         key->gpio = of_get_gpio(dev->of_node, i);
         if (key->gpio < 0) {
             dev_err(dev, "failed to get gpio%d\n", i);
@@ -151,7 +161,9 @@ static int mykey_probe(struct platform_device *pdev)
         /*
             参数一：中断号
             参数二：处理函数
-            参数三：触发方式 四名字 五devid
+            参数三：触发方式 
+            四 名字 
+            五 devid
         */
         ret = request_irq(key->irq, key_irq_handler, IRQF_TRIGGER_LOW,
                             ("key%d", i),key);
@@ -177,6 +189,8 @@ static int mykey_probe(struct platform_device *pdev)
             dev_err(dev, "failed to register misc device %d\n", i);
             goto err_gpio;
         }
+
+        init_waitqueue_head(&key->wait_queue);  // 初始化等待队列头
         //保存数据
         platform_set_drvdata(pdev, key);
     }
@@ -220,17 +234,14 @@ static const struct of_device_id key_of_match[] = {
 	{ .compatible = "agn,gpio_key" },//兼容属性与设备树上的一致
 	{ /* Sentinel 最后一个要空的*/ }
 };
-//
-定义设备ID列表，以便内核可以自动将驱动程序与设备进行�
-�配
+//定义设备ID列表，以便内核可以自动将驱动程序与设备进行匹配
 MODULE_DEVICE_TABLE(of, key_of_match);
 
 /* platform驱动结构体 */
 static struct platform_driver key_driver = {
 	.driver = {
 		.name			= KEY_NAME,		// 驱动名字，用于和设备匹配
-		.of_match_table	= key_of_match,		// 
-设备树匹配表，用于和设备树中定义的设备匹配
+		.of_match_table	= key_of_match,		// 设备树匹配表，用于和设备树中定义的设备匹配
 	},
 	.probe		= mykey_probe,	// probe函数
 	.remove		= mykey_remove,	// remove函数
@@ -260,13 +271,12 @@ static void __exit _key_exit(void)
 	/* 平台解绑 */
 	platform_driver_unregister(&key_driver);
 }
+
 //也可以将该平台设备驱动程序注册到内核中
 //module_platform_driver(key_driver);
 
-
 //驱动程序的入口
 module_init(_key_init);
-
 //驱动程序的出口
 module_exit(_key_exit);
 
