@@ -2,30 +2,30 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/cdev.h>  //cdev_init
-
+#include <linux/err.h>
 #include <linux/fs.h> //register_chrdev_region 
 #include <asm/uaccess.h>//copy_from_user copy_to_user
-
 #include <linux/platform_device.h> //平台设备驱动模型
 #include <linux/of.h>		//设备树相关头文件
 #include <linux/of_gpio.h>
+#include <linux/gpio/consumer.h>    // gpiod
 #include <linux/of_address.h>
 #include <linux/of_fdt.h>
 #include <linux/of_platform.h> 
-
 #include <linux/miscdevice.h> //混杂设备注册
 #include <linux/interrupt.h> //中断
 #include <linux/wait.h>   //等待队列
 #define GPIO_MAX_COUNT    保存最大引脚数
-//保存引脚的数组
-//static struct gpio key_gpios[GPIO_MAX_COUNT];
-//按键的设备号
-//static int key_major = 0;
-//定义按键的键值
-//#define KEY0_VAL            0xF0
-//#define INV_KEY_VAL         0x00
-//定义关于设备注册的参数
-//#define KEY_CNT             1               /* 按键设备数 */
+//引脚资源// 兼容性
+
+#if 0  //  不编译方便查看设备树
+gpio_keys_agn 
+    {        
+        compatible = "agn,gpio_key";        
+		key-gpios = <&pio 2 GPIO_ACTIVE_LOW 
+			&pio 7 GPIO_ACTIVE_LOW>;
+    };   
+#endif
 
 #define KEY_NAME            "key"           /* 按键名称 */
 //增加__must_be_array(arr)来检查参数是否是一个数组，如果不是则会在编译期间报错
@@ -38,20 +38,36 @@ struct key_data {
     int gpio;               // GPIO号
     bool value;             // 按键状态
     wait_queue_head_t wait_queue; //等待队列头
+    struct gpio_desc desc;    //定义设备描述符
 };
+
+
+
 /*第一个参数：中断函数注册时的中断号irq
 第二个参数：注册的时候最后一个参数dev_id*/
 static irqreturn_t key_irq_handler(int irq, void *dev_id)
 {
     struct key_data *key = dev_id
-    //获取按键的值
-    key->value  = !gpio_get_value(key->gpio)
+
     //有中断就唤醒等待队列
     wake_up_interruptible(key->wait_queue);
+    // 调度tasklet
+    tasklet_schedule(&button_tasklet); 
 
     return IRQ_HANDLED
 }
-//实例化 改在probe里面分配空间方便释放
+// tasklet处理函数
+static void key_tasklet(unsigned long data)
+{
+    printk(KERN_INFO "tasklet is running...\n");
+
+    // 处理按键事件
+    //获取按键的逻辑值
+    key->value  = gpiod_get_value(key->desc)
+}
+// 定义tasklet
+DECLARE_TASKLET(key_tasklet, key_tasklet, 0);
+
 
 //打开开关函数
 static int key_open(struct inode *node, struct file *filp)
@@ -81,7 +97,7 @@ loff_t *fpos)
     int value;
     //函数会等待一个条件成立，如果条件（第二个参数）不成立，则会将当前进程或线程挂起，
     //直到条件成立或者被信号中断 这里是等待按键的状态变化实现阻塞
-    wait_event_interruptible(key->wait_queue,key->value != gpio_get_value(key->gpio))
+    wait_event_interruptible(key->wait_queue,key->value = gpiod_get_value(key->desc))
 
     value = key->value;
 
@@ -126,33 +142,25 @@ static int mykey_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct key_data *key;
 	int i, ret,irq;
-	//遍历获取gpio口的值
+	//遍历获取gpio口的属性
 	for (i = 0; i < ARRAY_SIZE(key_miscdev); i++) {
 		//这样分配的空间设备被卸载时会自动释放
         key = devm_kzalloc(dev, sizeof(*key), GFP_KERNEL);
         if (!key)
             return -ENOMEM;
-        //获取端口号
-        key->gpio = of_get_gpio(dev->of_node, i);
-        if (key->gpio < 0) {
-            dev_err(dev, "failed to get gpio%d\n", i);
-            return key->gpio;
+        //获取gpio描述符 从设备树读取名为"key-gpios"的gpio口第i个端口
+        key->desc = gpiod_get_index(dev->of_node, "key-gpios", i, GPIO_ACTIVE_LOW);
+		if (IS_ERR(key->desc)) {
+            dev_err(dev, "failed to gpiod_get %d \n", i);
+            goto err_gpio_get;
         }
-		//请求端口资源
-        ret = gpio_request(key->gpio, "agn,gpio_key");
-        if (ret) {
-            dev_err(dev, "failed to request gpio%d\n", i);
-            return ret;
-        }
-		//设置输入模式
-        ret = gpio_direction_input(key->gpio);
+        //设置输入模式
+        ret = gpiod_direction_input(key->desc);
         if (ret) {
             dev_err(dev, "failed to set gpio%d direction\n", i);
-            goto err_gpio;
         }
-
         //获取端口的中断号
-        key->irq = gpio_to_irq(key->gpio);
+        key->irq = gpiod_to_irq(key->desc);
         if(key->irq < 0){
             dev_err(&pdev->dev, "failed to get the irq%d", i)
         }
@@ -162,8 +170,8 @@ static int mykey_probe(struct platform_device *pdev)
             参数一：中断号
             参数二：处理函数
             参数三：触发方式 
-            四 名字 
-            五 devid
+            参数四 名字 
+            参数五 devid
         */
         ret = request_irq(key->irq, key_irq_handler, IRQF_TRIGGER_LOW,
                             ("key%d", i),key);
@@ -171,12 +179,11 @@ static int mykey_probe(struct platform_device *pdev)
             dev_err(&pdev->dev, "failed to request irq%d", i);
             return ret;
         }
-
         key_miscdev[i].name = devm_kasprintf(dev, GFP_KERNEL, "%s%d",
                                                    KEY_NAME, i);
         if (!key_miscdev[i].name) {
             ret = -ENOMEM;
-            goto err_gpio;
+            goto err_gpio_misc;
         }
 
         key_miscdev[i].parent = dev;
@@ -187,23 +194,22 @@ static int mykey_probe(struct platform_device *pdev)
         ret = misc_register(&key_miscdev[i]);
         if (ret) {
             dev_err(dev, "failed to register misc device %d\n", i);
-            goto err_gpio;
+            goto err_gpio_misc;
         }
-
-        init_waitqueue_head(&key->wait_queue);  // 初始化等待队列头
+        // 初始化等待队列头
+        init_waitqueue_head(&key->wait_queue);  
         //保存数据
         platform_set_drvdata(pdev, key);
     }
 
     pr_info(DRIVER_NAME ": initialized\n");
-
     return 0;
 
-err_gpio:
+err_gpio_get:
+    gpiod_put(key->desc);
+err_gpio_misc:
 while (--i >= 0) {
-	key = platform_get_drvdata(pdev);
-	misc_deregister(&key_miscdev[i]);
-	gpio_free(key->gpio);
+    misc_deregister(&key_miscdev[i]);
 }
 return ret;	
 		
@@ -217,8 +223,9 @@ static int mykey_remove(struct platform_device *dev)
     for (i = 0; i < ARRAY_SIZE(key_miscdev); i++) {
         key = platform_get_drvdata(pdev);
         misc_deregister(&key_miscdev[i]);
-        gpio_free(key->gpio);
-        free_irq(key->irq, key)
+        free_irq(key->irq, key);
+        gpiod_put(key->desc);
+        tasklet_kill(&key_tasklet); // 杀死tasklet
     }
 
     return 0;
