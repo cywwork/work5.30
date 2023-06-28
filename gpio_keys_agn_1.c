@@ -15,7 +15,8 @@
 #include <linux/miscdevice.h> //混杂设备注册
 #include <linux/interrupt.h> //中断
 #include <linux/wait.h>   //等待队列
-#define GPIO_MAX_COUNT    保存最大引脚数
+#include <linux/string.h>
+
 //引脚资源// 兼容性
 
 #if 0  //  不编译方便查看设备树
@@ -36,26 +37,23 @@ gpio_keys_agn
 struct key_data {
     int irq;                // 中断号
     int gpio;               // GPIO号
-    bool value;             // 按键状态
-    wait_queue_head_t wait_queue; //等待队列头
+    int value;             // 按键状态
     struct gpio_desc desc;    //定义设备描述符
 };
-
+//等待队列头
+wait_queue_head_t wait_queue; 
 
 
 /*第一个参数：中断函数注册时的中断号irq
 第二个参数：注册的时候最后一个参数dev_id*/
 static irqreturn_t key_irq_handler(int irq, void *dev_id)
 {
-    struct key_data *key = dev_id
-
-    //有中断就唤醒等待队列
-    wake_up_interruptible(key->wait_queue);
+    struct key_data *key = dev_id;
     // 调度tasklet
-    tasklet_schedule(&button_tasklet); 
-
+    tasklet_schedule(&key_tasklet); 
     return IRQ_HANDLED
 }
+
 // tasklet处理函数
 static void key_tasklet(unsigned long data)
 {
@@ -63,7 +61,10 @@ static void key_tasklet(unsigned long data)
 
     // 处理按键事件
     //获取按键的逻辑值
-    key->value  = gpiod_get_value(key->desc)
+    key->value  = gpiod_get_value(key->desc);
+    //有中断就唤醒等待队列
+    wake_up_interruptible(wait_queue);
+
 }
 // 定义tasklet
 DECLARE_TASKLET(key_tasklet, key_tasklet, 0);
@@ -95,9 +96,10 @@ loff_t *fpos)
 {
     struct key_data *key = container_of(filp->private_data, struct key_data, gpio);
     int value;
+    key->value = 0;
     //函数会等待一个条件成立，如果条件（第二个参数）不成立，则会将当前进程或线程挂起，
     //直到条件成立或者被信号中断 这里是等待按键的状态变化实现阻塞
-    wait_event_interruptible(key->wait_queue,key->value = gpiod_get_value(key->desc))
+    wait_event_interruptible(wait_queue,key->value)
 
     value = key->value;
 
@@ -133,7 +135,8 @@ static struct miscdevice key_miscdev[] = {
         .fops = &key_fops,
     },
 };
-
+//创建结构体数组保存两个key的信息
+struct key_data key_struct[ARRAY_SIZE(key_miscdev)];
 
 
 static int mykey_probe(struct platform_device *pdev)
@@ -142,6 +145,9 @@ static int mykey_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct key_data *key;
 	int i, ret,irq;
+    // 初始化等待队列头
+    init_waitqueue_head(wait_queue); 
+
 	//遍历获取gpio口的属性
 	for (i = 0; i < ARRAY_SIZE(key_miscdev); i++) {
 		//这样分配的空间设备被卸载时会自动释放
@@ -162,7 +168,7 @@ static int mykey_probe(struct platform_device *pdev)
         //获取端口的中断号
         key->irq = gpiod_to_irq(key->desc);
         if(key->irq < 0){
-            dev_err(&pdev->dev, "failed to get the irq%d", i)
+            dev_err(dev, "failed to get the irq%d", i)
         }
 
         // 将中断号与处理函数对应
@@ -173,19 +179,22 @@ static int mykey_probe(struct platform_device *pdev)
             参数四 名字 
             参数五 devid
         */
-        ret = request_irq(key->irq, key_irq_handler, IRQF_TRIGGER_LOW,
-                            ("key%d", i),key);
+        
+        
+        
+        ret = request_irq(key->irq, key_irq_handler, IRQF_TRIGGER_RISING|IRQF_TRIGGER_FALLING,
+                            KEY_NAME, key);
         if (ret) {
-            dev_err(&pdev->dev, "failed to request irq%d", i);
+            dev_err(dev, "failed to request irq%d", i);
             return ret;
         }
+
         key_miscdev[i].name = devm_kasprintf(dev, GFP_KERNEL, "%s%d",
                                                    KEY_NAME, i);
         if (!key_miscdev[i].name) {
             ret = -ENOMEM;
             goto err_gpio_misc;
         }
-
         key_miscdev[i].parent = dev;
         key_miscdev[i].minor = MISC_DYNAMIC_MINOR;
         key_miscdev[i].mode = S_IRUSR | S_IWUSR;
@@ -196,12 +205,11 @@ static int mykey_probe(struct platform_device *pdev)
             dev_err(dev, "failed to register misc device %d\n", i);
             goto err_gpio_misc;
         }
-        // 初始化等待队列头
-        init_waitqueue_head(&key->wait_queue);  
-        //保存数据
-        platform_set_drvdata(pdev, key);
+        key_struct[i] = key;
+        
     }
-
+//保存数据
+    platform_set_drvdata(pdev, key_struct);
     pr_info(DRIVER_NAME ": initialized\n");
     return 0;
 
@@ -221,10 +229,10 @@ static int mykey_remove(struct platform_device *dev)
     int i;
 
     for (i = 0; i < ARRAY_SIZE(key_miscdev); i++) {
-        key = platform_get_drvdata(pdev);
+        key_struct = platform_get_drvdata(pdev);
         misc_deregister(&key_miscdev[i]);
-        free_irq(key->irq, key);
-        gpiod_put(key->desc);
+        free_irq(key_struct[i]->irq, key);
+        gpiod_put(key_struct[i]->desc);
         tasklet_kill(&key_tasklet); // 杀死tasklet
     }
 
